@@ -1,0 +1,50 @@
+
+[14:19:45] src=D:\
+[14:19:47] os=Microsoft Windows 11 Enterprise Evaluation build=26100
+[14:19:47] elevated=True
+[14:19:47] tamper_raw=1
+[14:19:49] defender_rt=True av=True
+[14:19:49] exclusion=ok
+[14:19:49] ---- run: --dry-run ----
+[14:19:52] dry_exit=1
+[14:19:52] hollow â?" process overwriting (24H2-safe)
+  host    : C:\Windows\System32\rundll32.exe
+  payload : payload.exe
+  admin   : sim
+  tamper  : desligado
+  winDefnd: rodando | realtime: on
+[*] aplicando ajustes no Defender
+    [ok] policy DisableAntiSpyware=1
+    [ok] policy DisableRealtimeMonitoring=1
+    [ok] policy DisableBehaviorMonitoring=1
+    [ok] policy DisableIOAVProtection=1
+    [fail] exclusion: loader directory
+    [fail] ControlService(WinDefend, STOP)
+    [fail] WinDefend start=disabled
+[*] syscalls: 7 stubs | gadget=00007FFF1DF9E9A2
+[!] payload invalido ou ausente: payload.exe
+
+[14:19:52] ---- run: overwrite ----
+[14:19:53] hollow_exit=1
+[14:19:53] hollow â?" process overwriting (24H2-safe)
+  host    : C:\Windows\System32\rundll32.exe
+  payload : payload.exe
+  admin   : sim
+  tamper  : desligado
+  winDefnd: rodando | realtime: on
+[*] aplicando ajustes no Defender
+    [ok] policy DisableAntiSpyware=1
+    [ok] policy DisableRealtimeMonitoring=1
+    [ok] policy DisableBehaviorMonitoring=1
+    [ok] policy DisableIOAVProtection=1
+    [fail] exclusion: loader directory
+    [fail] ControlService(WinDefend, STOP)
+    [fail] WinDefend start=disabled
+[*] syscalls: 7 stubs | gadget=00007FFF1DF9E9A2
+[!] payload invalido ou ausente: payload.exe
+
+[14:19:58] marker=ABSENT
+[14:19:58] ---- done ----
+
+--- marker ---
+ABSENT

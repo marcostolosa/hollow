@@ -1,0 +1,21 @@
+# binários gerados
+dist/
+
+# imagens de VM (grandes)
+lab/images/
+lab/*.ppm
+lab/mon.sock
+lab/*.log
+
+# artefatos de build
+payload/strings.h
+*.o
+*.pdb
+
+# noVNC/websockify baixados para o viewer web
+lab/web/
+lab/usb/System Volume Information/
+
+# copias de trabalho do dist/ (geradas por build.sh)
+lab/share/*.exe
+lab/usb/*.exe
