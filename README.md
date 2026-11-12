@@ -201,7 +201,27 @@ Detalhes e evidências em [`lab/reports/evidence/`](lab/reports/evidence/).
 
 ---
 
-## 8. Defender e Tamper Protection
+## 8. Portabilidade entre builds do Windows
+
+Nada aqui depende de uma build específica: o SSN é lido em runtime do stub do
+`ntdll` da própria máquina, o gadget `syscall; ret` é procurado no `.text` desse
+mesmo `ntdll`, e o host é escolhido por tamanho. O que **varia** entre máquinas e
+como é tratado:
+
+| Varia | Tratamento |
+|---|---|
+| `SizeOfImage` do host difere por build | escolhe o primeiro host de uma lista cuja imagem comporte o payload; `--host` explícito também é validado |
+| DLL do payload não mapeada no alvo | carregada via `LoadLibraryA` remoto antes de resolver a IAT |
+| DLL mapeada em base diferente da nossa | endereço = `base_no_alvo + (endereço_local - base_local)` |
+| Loader já inicializado (24H2) ou não | IAT e entry point resolvidos manualmente nos dois casos |
+| `LdrInitializeThunk` não exportado | cai no caminho de ajuste manual do `Rip` |
+
+**Não coberto:** Windows on ARM64 (o payload é x64), processos 32-bit, e máquinas
+com EDR de verdade — nesse último caso o problema é detecção, não portabilidade.
+
+---
+
+## 9. Defender e Tamper Protection
 
 O loader é honesto sobre o que consegue e o que não consegue:
 
@@ -220,7 +240,7 @@ HVCI e KDP nas builds atuais.
 
 ---
 
-## 9. Superfície de detecção
+## 10. Superfície de detecção
 
 O que esta técnica **deixa** visível:
 
@@ -237,7 +257,7 @@ Mitigações usuais em engajamento real: mapear como `MEM_IMAGE` nomeado, evitar
 
 ---
 
-## 10. Limitações
+## 11. Limitações
 
 - Só funciona em processo **recém-criado** (não injeta em processo já rodando).
 - `SizeOfImage` do payload precisa caber no host.
@@ -248,7 +268,7 @@ Mitigações usuais em engajamento real: mapear como `MEM_IMAGE` nomeado, evitar
 
 ---
 
-## 11. Referências
+## 12. Referências
 
 - hasherezade — *Process Hollowing on Windows 11 24H2* (2025) e o PoC `process_overwriting`
 - Elastic — *Process Ghosting* (2021), *Process Herpaderping* (2020)
