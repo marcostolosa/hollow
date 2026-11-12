@@ -23,7 +23,7 @@ def inspect(data: bytes) -> dict:
     if len(data) < 0x40 or data[:2] != b"MZ":
         raise PEFormatError("missing or truncated DOS header")
     pe = _field(data, "<I", 0x3C)
-    if pe + 24 > len(data) or data[pe:pe + 4] != b"PE\\x00\\x00":
+    if pe + 24 > len(data) or data[pe:pe + 4] != bytes((80, 69, 0, 0)):
         raise PEFormatError("missing or truncated PE signature")
     coff = pe + 4
     machine, count, _, _, _, opt_size, flags = _field(data, "<HHIIIHH", coff)
